@@ -2129,8 +2129,8 @@ test = ["Pillow (>=11.0.0,<12.0.0)", "python-dotenv (>=1.0.0,<2.0.0)"]
 [package.source]
 type = "git"
 url = "https://github.com/xeon826/pyvnc.git"
-reference = "09a6c76251feb526d6b5e84942b61030c4243dc0"
-resolved_reference = "09a6c76251feb526d6b5e84942b61030c4243dc0"
+reference = "1b497ccf81aa322e321ab81ee5900e1f0abac656"
+resolved_reference = "1b497ccf81aa322e321ab81ee5900e1f0abac656"
 
 [[package]]
 name = "pywin32"
@@ -3369,4 +3369,4 @@ testing = ["big-O", "jaraco.functools", "jaraco.itertools", "more-itertools", "p
 [metadata]
 lock-version = "2.1"
 python-versions = "^3.11,<3.13"
-content-hash = "4fce2e3d7e312b5725aad6fc9a3dfd2fdda3c8277352e21a08a161faac2dc423"
+content-hash = "12b251caf9d7a1ca015f63f91c4857b51f03d9235fedb54096274acc536e99f7"

@@ -258,17 +258,38 @@ def _validate_string(string: str) -> None:
         )
 
 
+INPUT_PENDING_WARNING_LINE = (
+    "[input-pending] this frame was last updated before the most recent input "
+    "sent through this server — the view may not reflect your last action; "
+    "re-read to confirm"
+)
+
+
 def _apply_stale_flag(client: AsyncVNCClient, result: Any) -> Any:
     """Surface pyvnc's stale-capture flag in tool output.
 
     Text results get the warning appended as a final line; non-text results
     (images) are returned as ``[result, warning]`` so both blocks reach the
     model (mcp 2.x converts lists to content blocks).
+
+    Also appends the input-pending advisory when the last framebuffer update
+    was parsed before the most recent key/mouse event we sent: the server may
+    be handing us queued pre-input frames.
     """
+    advisories: list[str] = []
     if getattr(client, "last_capture_stale", False):
+        advisories.append(STALE_WARNING_LINE)
+    input_time = getattr(client, "last_input_time", 0.0)
+    update_time = getattr(client, "last_update_time", 0.0)
+    if input_time and update_time and update_time < input_time:
+        advisories.append(INPUT_PENDING_WARNING_LINE)
+    if not advisories:
+        return result
+    for line in advisories:
         if isinstance(result, str):
-            return f"{result}\n{STALE_WARNING_LINE}"
-        return [result, STALE_WARNING_LINE]
+            result = f"{result}\n{line}"
+        else:
+            result = [result, line] if not isinstance(result, list) else [*result, line]
     return result
 
 
@@ -912,11 +933,47 @@ async def create_mcp_server(vnc_config: VNCConfig, *, log_level: str | None = No
         client = await _get_client()
         success = await client.reconnect()
         if success:
+            # The first update after a reconnect can be the server's queued
+            # pre-reconnect damage (partial/blank), which would hand the caller
+            # a stale-looking frame. Absorb it: one throwaway capture so the
+            # caller's next read reflects the live screen.
+            try:
+                await client.capture()
+            except (ConnectionError, RuntimeError):
+                pass
             return (
                 f"Reconnected to {client.desktop_name!r}; framebuffer "
                 f"{client.rect.width}x{client.rect.height}."
             )
         return f"Reconnection failed (last error: {client.last_error!r})."
+
+    # Clipboard
+    @mcp_server.tool()
+    @_logged_tool
+    async def get_clipboard(wait_seconds: float = 0.0) -> str:
+        """Returns the guest machine's clipboard text as pushed by the server
+        (ServerCutText). Empty string result means nothing was received yet.
+
+        Workflow for reading long console output exactly (no OCR): run the
+        command as `command | clip` (Windows) in the guest console, then call
+        this with wait_seconds 2-3 to wait for the clipboard push. Only
+        receives text pushed while this MCP server is connected. Binary and
+        non-text clipboard formats are not representable over RFB.
+        """
+        if not 0 <= wait_seconds <= 30:
+            raise ValueError(f"wait_seconds must be 0..30, got {wait_seconds}")
+        client = await _get_client()
+        t0 = time.monotonic()
+        while wait_seconds > 0 and client.last_cut_text_time <= t0:
+            if time.monotonic() - t0 >= wait_seconds:
+                break
+            await asyncio.sleep(0.2)
+        if client.last_cut_text is None:
+            return (
+                "(clipboard empty — no ServerCutText received this session; "
+                "put text on the guest clipboard, e.g. run `command | clip`)"
+            )
+        return client.last_cut_text
 
     # Scroll the mouse wheel
     @mcp_server.tool()

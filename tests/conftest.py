@@ -31,7 +31,13 @@ class FakeVNCClient:
         self.clicks: list[int] = []
         self.scrolled: list[tuple[str, int]] = []
         self.reconnect_calls = 0
+        self.reconnect_fails = False
+        self.capture_errors: list[Exception] = []
         self.last_capture_stale = False
+        self.last_cut_text: str | None = None
+        self.last_cut_text_time: float = 0.0
+        self.last_update_time: float = 0.0
+        self.last_input_time: float = 0.0
         self.last_error: Exception | None = None
         self.capture_array = np.zeros((height, width, 4), dtype=np.uint8)
 
@@ -40,6 +46,8 @@ class FakeVNCClient:
         return True
 
     async def capture(self, rect: Any = None, **kwargs: Any) -> np.ndarray:
+        if self.capture_errors:
+            raise self.capture_errors.pop(0)
         self.capture_calls.append(rect)
         if rect is None:
             return self.capture_array.copy()

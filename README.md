@@ -130,11 +130,20 @@ The MCP server exposes these tools:
   2=right, 3=scroll up, 4=scroll down (up to 7 for exotic buttons).
 - **Scrolling** — `scroll_up` and `scroll_down` with a `repeat` count (capped at 50).
 - **Recovery** — `reconnect_vnc` forces a fresh VNC reconnect (full handshake, server-side
-  client state reset): the reliable cure for a wedged server update pipeline. Capture tools
-  also detect the silent-staleness case (a forced full-frame request answered with zero
-  rectangles, e.g. during a Windows UAC/secure-desktop transition): they retry internally and,
-  if the server still sends nothing, append a `[stale]` warning line to the tool output so the
-  model knows to retry or reconnect instead of acting on an outdated view.
+  client state reset): the reliable cure for a wedged server update pipeline. It also absorbs
+  the server's queued pre-reconnect damage frame internally, so the first read after a
+  reconnect reflects the live screen. Capture tools also detect the silent-staleness cases
+  (a forced full-frame request answered with zero rectangles, or not answered at all — e.g.
+  during a Windows UAC/secure-desktop transition): they retry internally and, if the server
+  still sends nothing, append a `[stale]` warning line to the tool output so the model knows
+  to retry or reconnect instead of acting on an outdated view. When the frame was parsed
+  before the most recent input event this client sent, an `[input-pending]` advisory is
+  appended instead — the screen may not yet reflect your last action.
+- **Clipboard** — `get_clipboard` returns the guest machine's clipboard text as pushed by the
+  server (`ServerCutText`), with an optional `wait_seconds` (0–30) to wait for a fresh push.
+  Workflow for reading long console output exactly, without OCR: run the command as
+  `command | clip` (Windows guest) in the console, then call `get_clipboard` with a short
+  wait. Only receives text pushed while this MCP server is connected.
 
 All coordinates are validated against the framebuffer bounds before they are sent, and all
 inputs are validated up front so no partial input reaches the VNC server. The VNC connection

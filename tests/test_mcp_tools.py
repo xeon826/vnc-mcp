@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import unittest.mock
 from io import BytesIO
 from typing import Any
 
@@ -376,6 +378,18 @@ class TestReconnectVnc:
         _server, client = server_and_client
         result = get_text(await call("reconnect_vnc", {}))
         assert client.reconnect_calls == 1
+        # The absorbing throwaway capture: swallows the server's queued
+        # pre-reconnect damage so the caller's next read is live.
+        assert len(client.capture_calls) == 1
+        assert "Reconnected" in result
+
+    async def test_reconnect_absorbing_capture_failure_is_swallowed(
+        self, server_and_client: Any, call: Any
+    ) -> None:
+        _server, client = server_and_client
+        client.capture_errors = [ConnectionError("mid-resync")]
+        result = get_text(await call("reconnect_vnc", {}))
+        assert client.reconnect_calls == 1
         assert "Reconnected" in result
 
     async def test_reconnect_failure(self, server_and_client: Any, call: Any) -> None:
@@ -389,6 +403,68 @@ class TestReconnectVnc:
         server, _ = server_and_client
         names = {tool.name for tool in await server.list_tools()}
         assert "reconnect_vnc" in names
+        assert "get_clipboard" in names
+
+    async def test_get_clipboard_empty(self, server_and_client: Any, call: Any) -> None:
+        _server, client = server_and_client
+        result = get_text(await call("get_clipboard", {}))
+        assert "clipboard empty" in result
+
+    async def test_get_clipboard_returns_text(
+        self, server_and_client: Any, call: Any
+    ) -> None:
+        _server, client = server_and_client
+        client.last_cut_text = "DISM output line 1\nDISM output line 2"
+        client.last_cut_text_time = 123.0
+        result = get_text(await call("get_clipboard", {}))
+        assert result == "DISM output line 1\nDISM output line 2"
+
+    async def test_get_clipboard_wait_returns_when_new_text_arrives(
+        self, server_and_client: Any, call: Any
+    ) -> None:
+        """Text pushed after the call started is returned without waiting it out."""
+        _server, client = server_and_client
+        original_sleep = asyncio.sleep
+        delays: list[float] = []
+
+        async def fast_sleep(seconds: float) -> None:
+            delays.append(seconds)
+            client.last_cut_text = "pushed during wait"
+            client.last_cut_text_time += 1.0
+            await original_sleep(0)
+
+        with unittest.mock.patch(
+            "vnc_mcp.mcp.asyncio.sleep", side_effect=fast_sleep
+        ):
+            result = get_text(await call("get_clipboard", {"wait_seconds": 3.0}))
+        assert result == "pushed during wait"
+        assert delays  # the wait loop actually polled
+
+    async def test_get_clipboard_rejects_out_of_range_wait(
+        self, server_and_client: Any, call: Any
+    ) -> None:
+        _server, client = server_and_client
+        with pytest.raises(ValueError, match="wait_seconds"):
+            await call("get_clipboard", {"wait_seconds": 99.0})
+
+    async def test_input_pending_advisory_appended_when_frame_predates_input(
+        self, server_and_client: Any, call: Any
+    ) -> None:
+        _server, client = server_and_client
+        client.last_input_time = 100.0
+        client.last_update_time = 50.0  # frame parsed BEFORE the input
+        result = get_text(await call("get_text_from_screen", {}))
+        assert "[input-pending]" in result
+
+    async def test_input_pending_advisory_absent_when_frame_is_newer(
+        self, server_and_client: Any, call: Any
+    ) -> None:
+        _server, client = server_and_client
+        client.last_input_time = 50.0
+        client.last_update_time = 100.0
+        result = get_text(await call("get_text_from_screen", {}))
+        assert "[input-pending]" not in result
+        assert "[stale]" not in result
 
 
 class TestLazyConnection:
