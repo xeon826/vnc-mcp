@@ -404,6 +404,13 @@ class TestReconnectVnc:
         names = {tool.name for tool in await server.list_tools()}
         assert "reconnect_vnc" in names
         assert "get_clipboard" in names
+        assert "set_clipboard" in names
+
+    async def test_set_clipboard_sends_text(self, server_and_client: Any, call: Any) -> None:
+        _server, client = server_and_client
+        result = get_text(await call("set_clipboard", {"text": "long diagnostic command"}))
+        assert client.clipboard_sets == ["long diagnostic command"]
+        assert "23 characters" in result
 
     async def test_get_clipboard_empty(self, server_and_client: Any, call: Any) -> None:
         _server, client = server_and_client

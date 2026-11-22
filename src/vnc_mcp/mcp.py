@@ -950,6 +950,23 @@ async def create_mcp_server(vnc_config: VNCConfig, *, log_level: str | None = No
     # Clipboard
     @mcp_server.tool()
     @_logged_tool
+    async def set_clipboard(text: str) -> str:
+        """Sets the guest machine's clipboard to *text* (RFB ClientCutText).
+
+        Paste it into a console afterwards with strike_keys(["Control_L", "v"])
+        (or Shift+Insert, the most universal paste in Windows consoles). This
+        is the preferred way to enter long or special-character-laden text:
+        it is lossless and instant, unlike write_string which synthesizes one
+        keystroke per character. Caveats: overwrites whatever is currently on
+        the guest clipboard; multi-line text pastes into consoles execute
+        line-by-line (each newline acts as Enter).
+        """
+        client = await _get_client()
+        await client.set_clipboard(text)
+        return f"Clipboard set to {len(text)} characters. Paste with strike_keys([\"Control_L\", \"v\"]) or Shift+Insert."
+
+    @mcp_server.tool()
+    @_logged_tool
     async def get_clipboard(wait_seconds: float = 0.0) -> str:
         """Returns the guest machine's clipboard text as pushed by the server
         (ServerCutText). Empty string result means nothing was received yet.

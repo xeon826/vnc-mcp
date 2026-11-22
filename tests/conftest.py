@@ -38,8 +38,12 @@ class FakeVNCClient:
         self.last_cut_text_time: float = 0.0
         self.last_update_time: float = 0.0
         self.last_input_time: float = 0.0
+        self.clipboard_sets: list[str] = []
         self.last_error: Exception | None = None
         self.capture_array = np.zeros((height, width, 4), dtype=np.uint8)
+
+    async def set_clipboard(self, text: str) -> None:
+        self.clipboard_sets.append(text)
 
     @property
     def is_connected(self) -> bool:

@@ -143,7 +143,11 @@ The MCP server exposes these tools:
   server (`ServerCutText`), with an optional `wait_seconds` (0–30) to wait for a fresh push.
   Workflow for reading long console output exactly, without OCR: run the command as
   `command | clip` (Windows guest) in the console, then call `get_clipboard` with a short
-  wait. Only receives text pushed while this MCP server is connected.
+  wait. Only receives text pushed while this MCP server is connected. `set_clipboard` sets
+  the guest clipboard (`ClientCutText`) — paste it with `strike_keys(["Control_L", "v"])` or
+  Shift+Insert. This is the lossless way to enter long or special-character text (no
+  keystroke synthesis); note that multi-line pastes into consoles execute line-by-line, and
+  setting overwrites the guest's current clipboard content.
 
 All coordinates are validated against the framebuffer bounds before they are sent, and all
 inputs are validated up front so no partial input reaches the VNC server. The VNC connection
