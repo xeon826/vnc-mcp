@@ -69,6 +69,16 @@ async def main(
             "If your VNC server does not for a username and only asks for a password, only specify the password.",
         ),
     ] = None,
+    log_level: Annotated[
+        str | None,
+        Option(
+            "--log-level",
+            show_envvar=True,
+            help="Log level for the server (DEBUG, INFO, WARNING, ERROR; default INFO). "
+            "This flag overrides the VNCMCP_LOG_LEVEL environment variable. "
+            "All logs go to stderr; stdout is reserved for the MCP stdio protocol.",
+        ),
+    ] = None,
 ) -> None:
     """Spawns an MCP server over stdio that can be used to interface with the VNC client.
 
@@ -81,7 +91,7 @@ async def main(
         username=username,
         password=password,
     )
-    mcp_server = await create_mcp_server(vnc_config)
+    mcp_server = await create_mcp_server(vnc_config, log_level=log_level)
     # enter the main loop of the MCP server
     await mcp_server.run_stdio_async()
 

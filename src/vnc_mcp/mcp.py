@@ -8,7 +8,11 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 from __future__ import annotations
 
 import asyncio
+import functools
 import logging
+import os
+import sys
+import time
 from functools import lru_cache
 from io import BytesIO
 from typing import Any
@@ -27,9 +31,106 @@ from pyvnc import key_codes
 
 logger = logging.getLogger(__package__)
 
+LOG_FORMAT = "%(asctime)s %(name)s %(levelname)s %(message)s"
+DEFAULT_LOG_LEVEL = "INFO"
+LOG_LEVEL_ENV_VAR = "VNCMCP_LOG_LEVEL"
+MAX_LOGGED_ARG_LENGTH = 200
+
+_logging_configured = False
+
+
+def parse_log_level(level: str | None) -> tuple[int, str | None]:
+    """Parse a level name case-insensitively; return (effective level, warning or None).
+
+    ``None`` or an empty string yields the default INFO level. Invalid values
+    also fall back to INFO, with a warning message the caller should log once
+    logging has been configured.
+    """
+    if level is None or not level.strip():
+        return logging.INFO, None
+    resolved = logging.getLevelName(level.strip().upper())
+    if isinstance(resolved, int):
+        return resolved, None
+    return (
+        logging.INFO,
+        f"Invalid {LOG_LEVEL_ENV_VAR} value {level!r}; falling back to {DEFAULT_LOG_LEVEL}.",
+    )
+
+
+def configure_logging(level: str | None = None) -> int:
+    """Configure root logging to stderr, exactly once.
+
+    The stream must be stderr, never stdout: stdout is the MCP stdio protocol
+    channel and any stray output there corrupts the handshake. The ``mcp`` and
+    ``pyvnc`` loggers are deliberately left inheriting the root config so their
+    output (e.g. pyvnc listener death) is visible.
+
+    Args:
+        level: explicit level name (the CLI ``--log-level`` flag). It overrides
+            the ``VNCMCP_LOG_LEVEL`` environment variable. ``None`` means use
+            the env var, defaulting to INFO.
+
+    Returns:
+        The effective numeric level that was applied.
+
+    """
+    global _logging_configured
+
+    effective_level, warning = parse_log_level(level or os.environ.get(LOG_LEVEL_ENV_VAR))
+
+    root = logging.getLogger()
+    if not _logging_configured:
+        handler = logging.StreamHandler(sys.stderr)
+        handler.setFormatter(logging.Formatter(LOG_FORMAT))
+        root.addHandler(handler)
+        root.setLevel(effective_level)
+        _logging_configured = True
+    else:
+        root.setLevel(effective_level)
+
+    if warning:
+        logger.warning(warning)
+
+    return effective_level
+
+
+def _truncate_for_log(payload: str, limit: int = MAX_LOGGED_ARG_LENGTH) -> str:
+    return payload if len(payload) <= limit else payload[: limit - 1] + "…"
+
+
+def _logged_tool(fn: Any) -> Any:
+    """Decorator adding entry/exit/exception DEBUG-ERROR logging to a tool.
+
+    Applied below ``mcp_server.tool()`` so the MCP schema is still generated
+    from the original signature (``functools.wraps`` preserves ``__wrapped__``).
+    ``logger.exception`` here is the single choke point where every tool error
+    is recorded with a full traceback before the model sees a clean message.
+    """
+
+    @functools.wraps(fn)
+    async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        name = fn.__name__
+        payload = _truncate_for_log(repr(kwargs) if kwargs else repr(args))
+        logger.debug("%s: entry, args=%s", name, payload)
+        start = time.perf_counter()
+        try:
+            result = await fn(*args, **kwargs)
+        except Exception:
+            logger.exception("%s: failed after %.1fms", name, (time.perf_counter() - start) * 1000)
+            raise
+        logger.debug("%s: exit, %.1fms", name, (time.perf_counter() - start) * 1000)
+        return result
+
+    return wrapper
+
 MAX_CLICK_REPEAT = 50
 MAX_SCROLL_REPEAT = 50
 MAX_MOUSE_BUTTON = 7  # RFB pointer-event button mask is a single byte
+
+STALE_WARNING_LINE = (
+    "[stale] server returned no framebuffer changes for a forced full-frame request; "
+    "this view may be outdated — retry this tool, or call reconnect_vnc"
+)
 
 TOOL_INSTRUCTIONS = (
     "This VNC client can be used to view the contents of and control the user's computer. "
@@ -65,7 +166,24 @@ async def _get_client() -> AsyncVNCClient:
     if _vnc_client is None:
         async with _vnc_connect_lock:
             if _vnc_client is None:
-                _vnc_client = await AsyncVNCClient.connect(_vnc_config)
+                config = _vnc_config
+                try:
+                    _vnc_client = await AsyncVNCClient.connect(config)
+                except Exception:
+                    logger.warning(
+                        "Failed to connect to VNC server at %s:%s.",
+                        config.host,
+                        config.port,
+                        exc_info=True,
+                    )
+                    raise
+                logger.info(
+                    "Connected to VNC server at %s:%s (framebuffer %sx%s).",
+                    config.host,
+                    config.port,
+                    _vnc_client.rect.width,
+                    _vnc_client.rect.height,
+                )
     return _vnc_client
 
 
@@ -140,6 +258,20 @@ def _validate_string(string: str) -> None:
         )
 
 
+def _apply_stale_flag(client: AsyncVNCClient, result: Any) -> Any:
+    """Surface pyvnc's stale-capture flag in tool output.
+
+    Text results get the warning appended as a final line; non-text results
+    (images) are returned as ``[result, warning]`` so both blocks reach the
+    model (mcp 2.x converts lists to content blocks).
+    """
+    if getattr(client, "last_capture_stale", False):
+        if isinstance(result, str):
+            return f"{result}\n{STALE_WARNING_LINE}"
+        return [result, STALE_WARNING_LINE]
+    return result
+
+
 def _rgba_to_pil(array: np.ndarray) -> PILImage.Image:
     return PILImage.fromarray(array, "RGBA")
 
@@ -182,10 +314,13 @@ def _run_ocr(array: np.ndarray) -> str:
     """
     engine = _get_ocr_engine()
     rgb = np.asarray(_rgba_to_pil(array).convert("RGB"))
+    start = time.perf_counter()
     result = engine(rgb)
+    elapsed_ms = (time.perf_counter() - start) * 1000
 
     height, width = array.shape[0], array.shape[1]
     if result.boxes is None or result.txts is None:
+        logger.info("OCR found no text regions in %.1fms.", elapsed_ms)
         return ""
 
     lines: list[str] = []
@@ -195,16 +330,28 @@ def _run_ocr(array: np.ndarray) -> str:
         x0, x1 = min(xs), max(xs)
         y0, y1 = min(ys), max(ys)
         lines.append(f"[{x0:.3f}, {y0:.3f}, {x1:.3f}, {y1:.3f}] {text}")
+    logger.info(
+        "OCR detected %d region(s) in %.1fms.", len(lines), elapsed_ms
+    )
     return "\n".join(lines)
 
 
-async def create_mcp_server(vnc_config: VNCConfig) -> MCPServer:
+async def create_mcp_server(vnc_config: VNCConfig, *, log_level: str | None = None) -> MCPServer:
     """Creates an MCPServer configured for the given VNC configuration.
 
     The VNC connection is established lazily on the first tool call so that a
     refused connection does not kill the MCP server during startup.
+
+    Args:
+        vnc_config: connection settings (host, port, credentials).
+        log_level: optional explicit level name (the CLI ``--log-level`` flag).
+            It overrides the ``VNCMCP_LOG_LEVEL`` environment variable, which
+            itself defaults to INFO. Logging is always on stderr.
+
     """
     global _vnc_config
+
+    configure_logging(log_level)
 
     _vnc_config = vnc_config
 
@@ -217,6 +364,7 @@ async def create_mcp_server(vnc_config: VNCConfig) -> MCPServer:
 
     # Get screen resolution
     @mcp_server.tool()
+    @_logged_tool
     async def get_screen_resolution() -> str:
         """Returns a string containing the width times height of the VNC session's workspace.
 
@@ -228,6 +376,7 @@ async def create_mcp_server(vnc_config: VNCConfig) -> MCPServer:
         return f"{client.rect.width}x{client.rect.height}"
 
     @mcp_server.tool()
+    @_logged_tool
     async def get_desktop_name() -> str:
         """Returns the name of the current environment reported by the server.
         """
@@ -235,6 +384,7 @@ async def create_mcp_server(vnc_config: VNCConfig) -> MCPServer:
         return client.desktop_name
 
     @mcp_server.tool()
+    @_logged_tool
     async def get_connection_status() -> str:
         """Returns the current VNC connection status: whether the client is connected,
         the desktop name, and the framebuffer resolution.
@@ -250,6 +400,7 @@ async def create_mcp_server(vnc_config: VNCConfig) -> MCPServer:
         return f"Disconnected.{detail} The client will attempt to reconnect automatically."
     # Whole screen image
     @mcp_server.tool()
+    @_logged_tool
     async def get_screen(
         max_dimension: int | None = None,
         format: Literal["png", "jpeg"] = "png",
@@ -265,9 +416,12 @@ async def create_mcp_server(vnc_config: VNCConfig) -> MCPServer:
         """
         client = await _get_client()
         raw_rgba_array = await client.capture()
-        return _prepare_image(raw_rgba_array, max_dimension=max_dimension, format=format)
+        return _apply_stale_flag(
+            client, _prepare_image(raw_rgba_array, max_dimension=max_dimension, format=format)
+        )
 
     @mcp_server.tool()
+    @_logged_tool
     async def get_text_from_screen() -> str:
         """Reads all visible text on the screen using OCR. This is the DEFAULT way to
         inspect screen state: prefer it over image tools.
@@ -282,10 +436,12 @@ async def create_mcp_server(vnc_config: VNCConfig) -> MCPServer:
         """
         client = await _get_client()
         raw_rgba_array = await client.capture()
-        return await asyncio.to_thread(_run_ocr, raw_rgba_array)
+        text = await asyncio.to_thread(_run_ocr, raw_rgba_array)
+        return _apply_stale_flag(client, text)
 
     # Relative rectangle image
     @mcp_server.tool()
+    @_logged_tool
     async def get_rectangle_of_screen(
         top_left_x: int,
         top_left_y: int,
@@ -310,9 +466,12 @@ async def create_mcp_server(vnc_config: VNCConfig) -> MCPServer:
         _validate_rect(client, top_left_x, top_left_y, width, height)
         rect = Rect(top_left_x, top_left_y, width, height)
         raw_rgba_array = await client.capture(rect)
-        return _prepare_image(raw_rgba_array, max_dimension=max_dimension, format=format)
+        return _apply_stale_flag(
+            client, _prepare_image(raw_rgba_array, max_dimension=max_dimension, format=format)
+        )
 
     @mcp_server.tool()
+    @_logged_tool
     async def get_text_from_rectangle_of_screen(
         top_left_x: int, top_left_y: int, width: int, height: int
     ) -> str:
@@ -331,10 +490,12 @@ async def create_mcp_server(vnc_config: VNCConfig) -> MCPServer:
         _validate_rect(client, top_left_x, top_left_y, width, height)
         rect = Rect(top_left_x, top_left_y, width, height)
         raw_rgba_array = await client.capture(rect)
-        return await asyncio.to_thread(_run_ocr, raw_rgba_array)
+        text = await asyncio.to_thread(_run_ocr, raw_rgba_array)
+        return _apply_stale_flag(client, text)
 
     # Strike key(s)
     @mcp_server.tool()
+    @_logged_tool
     async def strike_keys(keys: list[str]) -> str:
         """Strikes the keys inputted without any delay between strikes nor any modifier keys held.
 
@@ -365,6 +526,7 @@ async def create_mcp_server(vnc_config: VNCConfig) -> MCPServer:
 
     # Write string
     @mcp_server.tool()
+    @_logged_tool
     async def write_string(
         string: str,
     ) -> str:
@@ -386,6 +548,7 @@ async def create_mcp_server(vnc_config: VNCConfig) -> MCPServer:
 
     # Strike key(s) with key(s) held
     @mcp_server.tool()
+    @_logged_tool
     async def strike_keys_with_keys_held(
         keys_to_strike: list[str],
         keys_to_hold: list[str],
@@ -422,6 +585,7 @@ async def create_mcp_server(vnc_config: VNCConfig) -> MCPServer:
 
     # Write string with key(s) held
     @mcp_server.tool()
+    @_logged_tool
     async def write_string_with_keys_held(
         string_to_write: str,
         keys_to_hold: list[str],
@@ -467,6 +631,7 @@ async def create_mcp_server(vnc_config: VNCConfig) -> MCPServer:
 
     # Strike key(s) with mouse button held
     @mcp_server.tool()
+    @_logged_tool
     async def strike_keys_with_mouse_button_held(
         keys_to_strike: list[str], mouse_button_to_hold: int
     ) -> str:
@@ -492,6 +657,7 @@ async def create_mcp_server(vnc_config: VNCConfig) -> MCPServer:
 
     # Write string with mouse button held
     @mcp_server.tool()
+    @_logged_tool
     async def write_string_with_mouse_button_held(
         string_to_write: str, mouse_button_to_hold: int
     ) -> str:
@@ -516,6 +682,7 @@ async def create_mcp_server(vnc_config: VNCConfig) -> MCPServer:
 
     # Strike key(s) with mouse button held and key(s) held
     @mcp_server.tool()
+    @_logged_tool
     async def strike_keys_with_mouse_button_and_keys_held(
         keys_to_strike: list[str],
         mouse_button_to_hold: int,
@@ -546,6 +713,7 @@ async def create_mcp_server(vnc_config: VNCConfig) -> MCPServer:
 
     # Write string with mouse button held and key(s) held
     @mcp_server.tool()
+    @_logged_tool
     async def write_string_with_mouse_button_and_keys_held(
         string_to_write: str,
         mouse_button_to_hold: int,
@@ -576,6 +744,7 @@ async def create_mcp_server(vnc_config: VNCConfig) -> MCPServer:
 
     # Move mouse from (x,y) to (w,z) with mouse button held
     @mcp_server.tool()
+    @_logged_tool
     async def move_mouse_with_mouse_button_held(
         start_x: int, start_y: int, end_x: int, end_y: int, mouse_button_to_hold: int
     ) -> str:
@@ -600,6 +769,7 @@ async def create_mcp_server(vnc_config: VNCConfig) -> MCPServer:
 
     # Move mouse from (x,y) to (w,z) with key(s) held
     @mcp_server.tool()
+    @_logged_tool
     async def move_mouse_with_keys_held(
         start_x: int, start_y: int, end_x: int, end_y: int, keys_to_hold: list[str]
     ) -> str:
@@ -619,6 +789,7 @@ async def create_mcp_server(vnc_config: VNCConfig) -> MCPServer:
 
     # Move mouse from (x,y) to (w,z) with key(s) and mouse button held
     @mcp_server.tool()
+    @_logged_tool
     async def move_mouse_with_keys_and_mouse_button_held(
         start_x: int,
         start_y: int,
@@ -652,6 +823,7 @@ async def create_mcp_server(vnc_config: VNCConfig) -> MCPServer:
 
     # Move mouse to (x,y)
     @mcp_server.tool()
+    @_logged_tool
     async def move_mouse_to(x: int, y: int) -> str:
         """Moves the mouse to the coordinates (x, y) in the VNC session's workspace.
 
@@ -664,6 +836,7 @@ async def create_mcp_server(vnc_config: VNCConfig) -> MCPServer:
 
     # Click (n) times at current position
     @mcp_server.tool()
+    @_logged_tool
     async def click_at_current_position(mouse_button: int, n: int) -> str:
         """Clicks the mouse at the current position n times (n is capped at 50).
 
@@ -691,6 +864,7 @@ async def create_mcp_server(vnc_config: VNCConfig) -> MCPServer:
 
     # Click (n) times at current position with key(s) held
     @mcp_server.tool()
+    @_logged_tool
     async def click_at_current_position_with_keys_held(
         mouse_button: int, n: int, keys_to_hold: list[str]
     ) -> str:
@@ -724,8 +898,29 @@ async def create_mcp_server(vnc_config: VNCConfig) -> MCPServer:
 
         return f"Successfully clicked {n} times at current position while holding keys {', '.join(keys_to_hold)}"
 
+    # Reconnect
+    @mcp_server.tool()
+    @_logged_tool
+    async def reconnect_vnc() -> str:
+        """Forces a fresh VNC reconnect: discards the current stream, re-handshakes,
+        and resets all server-side client state.
+
+        Use this when tools report a stale view (the "[stale]" marker in OCR or
+        image output) or when the remote server's update pipeline appears wedged:
+        a reconnect is the reliable cure for a stuck dirty-region pipeline.
+        """
+        client = await _get_client()
+        success = await client.reconnect()
+        if success:
+            return (
+                f"Reconnected to {client.desktop_name!r}; framebuffer "
+                f"{client.rect.width}x{client.rect.height}."
+            )
+        return f"Reconnection failed (last error: {client.last_error!r})."
+
     # Scroll the mouse wheel
     @mcp_server.tool()
+    @_logged_tool
     async def scroll_up(repeat: int = 1) -> str:
         """Scrolls the mouse wheel upwards (content moves down) at the current mouse position,
         repeat times (capped at 50). In most applications, each repeat scrolls a few lines.
@@ -736,6 +931,7 @@ async def create_mcp_server(vnc_config: VNCConfig) -> MCPServer:
         return f"Successfully scrolled up {repeat} time(s)"
 
     @mcp_server.tool()
+    @_logged_tool
     async def scroll_down(repeat: int = 1) -> str:
         """Scrolls the mouse wheel downwards (content moves up) at the current mouse position,
         repeat times (capped at 50). In most applications, each repeat scrolls a few lines.

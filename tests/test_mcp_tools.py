@@ -38,6 +38,7 @@ EXPECTED_TOOLS = {
     "click_at_current_position_with_keys_held",
     "scroll_up",
     "scroll_down",
+    "reconnect_vnc",
 }
 
 
@@ -321,6 +322,75 @@ class TestImageTools:
             await call("get_screen", {"max_dimension": 0})
 
 
+class TestStaleFlag:
+    async def test_stale_text_tool_appends_warning(
+        self, server_and_client: Any, monkeypatch: pytest.MonkeyPatch, call: Any
+    ) -> None:
+        server, client = server_and_client
+        monkeypatch.setattr(
+            mcp_module, "_get_ocr_engine", lambda: _FakeEngine(None, None)
+        )
+        client.last_capture_stale = True
+        result = get_text(await call("get_text_from_screen", {}))
+        assert result.endswith(mcp_module.STALE_WARNING_LINE)
+
+    async def test_fresh_text_tool_no_warning(self, server_and_client: Any, monkeypatch: pytest.MonkeyPatch, call: Any) -> None:
+        server, client = server_and_client
+        monkeypatch.setattr(
+            mcp_module, "_get_ocr_engine", lambda: _FakeEngine(None, None)
+        )
+        client.last_capture_stale = False
+        result = get_text(await call("get_text_from_screen", {}))
+        assert mcp_module.STALE_WARNING_LINE not in result
+
+    async def test_stale_image_tool_appends_warning(self, server_and_client: Any, call: Any) -> None:
+        _server, client = server_and_client
+        client.last_capture_stale = True
+        result = await call("get_screen", {})
+        assert isinstance(result.content, list) and len(result.content) == 2
+        assert result.content[1].text == mcp_module.STALE_WARNING_LINE
+
+    async def test_fresh_image_tool_no_warning(self, server_and_client: Any, call: Any) -> None:
+        _server, client = server_and_client
+        client.last_capture_stale = False
+        result = await call("get_screen", {})
+        assert len(result.content) == 1
+
+    async def test_stale_rectangle_text_appends_warning(self, server_and_client: Any, monkeypatch: pytest.MonkeyPatch, call: Any) -> None:
+        _server, client = server_and_client
+        monkeypatch.setattr(
+            mcp_module, "_get_ocr_engine", lambda: _FakeEngine(None, None)
+        )
+        client.last_capture_stale = True
+        result = get_text(
+            await call(
+                "get_text_from_rectangle_of_screen",
+                {"top_left_x": 0, "top_left_y": 0, "width": 10, "height": 10},
+            )
+        )
+        assert result.endswith(mcp_module.STALE_WARNING_LINE)
+
+
+class TestReconnectVnc:
+    async def test_reconnect_success(self, server_and_client: Any, call: Any) -> None:
+        _server, client = server_and_client
+        result = get_text(await call("reconnect_vnc", {}))
+        assert client.reconnect_calls == 1
+        assert "Reconnected" in result
+
+    async def test_reconnect_failure(self, server_and_client: Any, call: Any) -> None:
+        _server, client = server_and_client
+        client.reconnect_fails = True
+        result = get_text(await call("reconnect_vnc", {}))
+        assert client.reconnect_calls == 1
+        assert "failed" in result
+
+    async def test_reconnect_registered(self, server_and_client: Any) -> None:
+        server, _ = server_and_client
+        names = {tool.name for tool in await server.list_tools()}
+        assert "reconnect_vnc" in names
+
+
 class TestLazyConnection:
     async def test_connection_failure_is_clean_error(
         self, server_and_client: Any, monkeypatch: pytest.MonkeyPatch, call: Any
@@ -340,10 +410,15 @@ class TestLazyConnection:
 
     async def test_lazy_client_reused(self, server_and_client: Any) -> None:
         import asyncio
+        from types import SimpleNamespace
 
         import vnc_mcp.mcp as module
 
-        marker = object()
+        marker = SimpleNamespace(
+            rect=__import__("pyvnc").Rect(0, 0, 100, 100),
+            desktop_name="fake",
+            is_connected=True,
+        )
 
         async def fake_connect(config: Any) -> Any:
             await asyncio.sleep(0)

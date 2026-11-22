@@ -30,6 +30,9 @@ class FakeVNCClient:
         self.moves: list[tuple[int, int]] = []
         self.clicks: list[int] = []
         self.scrolled: list[tuple[str, int]] = []
+        self.reconnect_calls = 0
+        self.last_capture_stale = False
+        self.last_error: Exception | None = None
         self.capture_array = np.zeros((height, width, 4), dtype=np.uint8)
 
     @property
@@ -75,6 +78,14 @@ class FakeVNCClient:
     async def scroll_down(self, repeat: int = 1) -> FakeVNCClient:
         self.scrolled.append(("down", repeat))
         return self
+
+    async def reconnect(self) -> bool:
+        self.reconnect_calls += 1
+        if getattr(self, "reconnect_fails", False):
+            self.last_error = ConnectionError("reconnect failed")
+            return False
+        self.last_capture_stale = False
+        return True
 
 
 class FakeOCREngine:

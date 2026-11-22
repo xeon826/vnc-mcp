@@ -129,6 +129,12 @@ The MCP server exposes these tools:
   `write_string_with_mouse_button_and_keys_held`). Mouse buttons are 0=left, 1=middle,
   2=right, 3=scroll up, 4=scroll down (up to 7 for exotic buttons).
 - **Scrolling** — `scroll_up` and `scroll_down` with a `repeat` count (capped at 50).
+- **Recovery** — `reconnect_vnc` forces a fresh VNC reconnect (full handshake, server-side
+  client state reset): the reliable cure for a wedged server update pipeline. Capture tools
+  also detect the silent-staleness case (a forced full-frame request answered with zero
+  rectangles, e.g. during a Windows UAC/secure-desktop transition): they retry internally and,
+  if the server still sends nothing, append a `[stale]` warning line to the tool output so the
+  model knows to retry or reconnect instead of acting on an outdated view.
 
 All coordinates are validated against the framebuffer bounds before they are sent, and all
 inputs are validated up front so no partial input reaches the VNC server. The VNC connection
