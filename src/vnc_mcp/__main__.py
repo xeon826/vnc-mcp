@@ -8,9 +8,7 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 # Breaks some typer work with the options
 # from __future__ import annotations
 
-import json
 from typing import Annotated
-from typing import Optional
 
 import typer
 
@@ -55,7 +53,7 @@ async def main(
         ),
     ] = 5.0,
     password: Annotated[
-        Optional[str],
+        str | None,
         Option(
             envvar="VNCMCP_PASSWORD",
             show_envvar=True,
@@ -63,7 +61,7 @@ async def main(
         ),
     ] = None,
     username: Annotated[
-        Optional[str],
+        str | None,
         Option(
             envvar="VNCMCP_USERNAME",
             show_envvar=True,
@@ -72,11 +70,10 @@ async def main(
         ),
     ] = None,
 ) -> None:
-    """
-    Spawns an MCP server over stdi/o that can be used to interface with the VNC client.
+    """Spawns an MCP server over stdio that can be used to interface with the VNC client.
 
-    Please note that the VNC server the client connects to must support basic VNC authentication. Servers implementing
-    ARD (Apple Remote Desktop) are not supported.
+    The VNC connection is established lazily on the first tool call, so startup
+    will not fail if the VNC server is unreachable yet.
     """
     vnc_config = VNCConfig(
         host=host,

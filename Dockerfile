@@ -5,15 +5,14 @@
 # breaking API changes.
 FROM python:3.12-slim-bookworm AS base
 
-# debian is used over alpine because google tesseract is not available in the alpine repositories, and I don't want to
-# write an apk build script to compile it myself.
+# debian is used over alpine for glibc compatibility with the onnxruntime wheels used by rapidocr.
 
-# In Python, the line between a compile-time and run-time dependency is blurry,
-# so we play it safe by installing everything
+# git is kept because pyvnc is installed from a git repository at build time.
+# rapidocr + onnxruntime are pure pip wheels: no compiler or system OCR libraries needed.
 RUN --mount=type=cache,target=/var/cache/apt,sharing=locked \
     --mount=type=cache,target=/var/lib/apt,sharing=locked \
     apt-get update \
-    && apt-get install -y tzdata gcc libc6-dev libffi-dev libssl-dev ca-certificates make git curl libtesseract-dev libtesseract5 tesseract-ocr tesseract-ocr-all \
+    && apt-get install -y tzdata gcc libc6-dev libffi-dev libssl-dev ca-certificates make git curl \
     && pip install --upgrade pip
 
 # --------------------------------------

@@ -1,24 +1,30 @@
-"""Test cases for the __main__ module."""
+"""Tests for the CLI: argument parsing only (no VNC connection is made)."""
 
-import pytest
+from __future__ import annotations
+
 from typer.testing import CliRunner
 
 from vnc_mcp.__main__ import cli
 
 
-@pytest.fixture
-def runner() -> CliRunner:
-    """Fixture for invoking command-line interfaces."""
-    return CliRunner()
+runner = CliRunner()
 
 
 class TestCLI:
-    """Test cases for the command-line interface."""
-
-    def test_main_succeeds(self, runner: CliRunner) -> None:
-        """Calls the default command and exits with a status code of zero."""
-        result = runner.invoke(cli)
+    def test_help_succeeds(self) -> None:
+        result = runner.invoke(cli, ["--help"])
         assert result.exit_code == 0
 
+    def test_positional_args_documented(self) -> None:
+        result = runner.invoke(cli, ["--help"])
+        for arg in ("HOST", "PORT", "USERNAME", "PASSWORD", "TIMEOUT"):
+            assert arg in result.output
 
-__all__ = ("TestCLI",)
+    def test_env_vars_documented(self) -> None:
+        result = runner.invoke(cli, ["--help"])
+        for envvar in ("VNCMCP_HOST", "VNCMCP_PORT", "VNCMCP_TIMEOUT", "VNCMCP_USERNAME", "VNCMCP_PASSWORD"):
+            assert envvar in result.output
+
+    def test_invalid_port_rejected(self) -> None:
+        result = runner.invoke(cli, ["localhost", "not-a-port"])
+        assert result.exit_code != 0

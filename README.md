@@ -1,14 +1,13 @@
 # vnc-mcp
 
 [![pre-commit](https://img.shields.io/badge/pre--commit-enabled-brightgreen?logo=pre-commit&logoColor=white)][pre-commit]
-[![Black](https://img.shields.io/badge/code%20style-black-000000.svg)][black]
+[![Ruff](https://img.shields.io/endpoint?url=https://raw.githubusercontent.com/astral-sh/ruff/main/assets/badge/v2.json)](https://github.com/astral-sh/ruff)
 
 [pypi status]: https://pypi.org/project/vnc-mcp/
 [read the docs]: https://vnc-mcp.readthedocs.io/
 [tests]: https://github.com/regulad/vnc-mcp/actions?workflow=Tests
 [codecov]: https://app.codecov.io/gh/regulad/vnc-mcp
 [pre-commit]: https://github.com/pre-commit/pre-commit
-[black]: https://github.com/psf/black
 
 🤖🖥 vnc-mcp allows MCP-compatible LLMs to interact with any desktop accessible over VNC
 
@@ -20,12 +19,12 @@ https://github.com/user-attachments/assets/5eff0be6-81f4-4baf-ad67-2f68041a022a
 
 - Connects to any [RFC6143](https://datatracker.ietf.org/doc/html/rfc6143) RFB spec-compliant VNC server using [`pyvnc`](https://github.com/regulad/pyvnc).
 - Exposes a number of MCP tools that an LLM can use to interact with a computer through the VNC client.
-- OCR for screen reading and text extraction, offering much better integration with non-multimodal LLMs. (Support for all languages unfortunately makes the image pretty huge...)
+- OCR for screen reading and text extraction using [RapidOCR](https://github.com/RapidAI/RapidOCR) (ONNX models, pure pip install — no system OCR packages needed). OCR results come with normalized bounding boxes so the calling model can compute click targets without receiving images.
 
 ## Requirements
 
 - A VNC server that is [RFC6143](https://datatracker.ietf.org/doc/html/rfc6143) RFB spec-compliant.
-- A VNC server that supports spec-compliant authentication (not sure which RFC this aligns with). This means ARD (Apple Remote Desktop) servers are not supported. Mac users should consider using the project https://github.com/baryhuang/mcp-remote-macos-use instead.
+- A VNC server that supports spec-compliant authentication. VNC authentication and Apple Remote Desktop (ARD) authentication are both supported (ARD support was added in the [pyvnc](https://github.com/regulad/pyvnc) fork this project uses).
 - (Optional) A VNC server that reuses your existing desktop session so you can see the actions an LLM is making and collaborate with it. This project was tested with [`krfb`](https://github.com/KDE/krfb), the preferred VNC server for both X11 and Wayland KDE sessions. It should be built into most KDE distros (I use Fedora 42 Kinoite). It may work with other DEs, but I am unsure. GNOME should also have a built-in VNC server. Windows (ew) users may have to experiment with alternative clients like TightVNC and TigerVNC. My experience with desktop-sharing VNC servers on this platform is not good. I would either suggest using RDP or switching to a Linux distribution with KDE or Gnome as a DE.
 - (Optional) A graphics-accelerated VM running KDE/another DE with a same-session VNC server. Having a VM is preferred because then your AI UI will not have access to itself, which can cause frustration as you wrestle the mouse away from your LLM in order to see its output. **NOTE:** if you want to use Qemu virtio OpenGL acceleration, make sure you do NOT have the proprietary Nvidia drivers installed. They will prohibit you from starting a VM with OpenGL acceleration. This is not a problem on MacOS if you are starting a VM through UTM, as virtio should work perfectly there with Metal.
 
@@ -105,6 +104,37 @@ The docker container will automatically update itself and operate with the host'
 ## Usage
 
 Please see the [Command-line Reference] for details.
+
+### Tools
+
+The MCP server exposes these tools:
+
+- **Screen inspection** — `get_screen_resolution`, `get_desktop_name`, `get_connection_status`.
+- **OCR (preferred)** — `get_text_from_screen` and `get_text_from_rectangle_of_screen` run RapidOCR
+  on the captured framebuffer and return one line per detected text region in the form
+  `[x0, y0, x1, y1] text`, where the coordinates are floats in 0..1 relative to the captured
+  image. Multiply by the workspace resolution to get pixel coordinates for clicking — no image
+  is needed to pick a click target.
+- **Images** — `get_screen` and `get_rectangle_of_screen` return a screenshot. Both accept an
+  optional `max_dimension` (downscale so the longest side is at most that many pixels,
+  preserving aspect ratio) and a `format` of `"png"` (lossless) or `"jpeg"` (quality 80,
+  much smaller). Use these when you genuinely need to see visual layout, color, or icons.
+- **Keyboard** — `strike_keys`, `write_string`, `strike_keys_with_keys_held`,
+  `write_string_with_keys_held`.
+- **Mouse** — `move_mouse_to`, `click_at_current_position`,
+  `click_at_current_position_with_keys_held`, and the move/hold variants
+  (`move_mouse_with_mouse_button_held`, `move_mouse_with_keys_held`,
+  `move_mouse_with_keys_and_mouse_button_held`, `strike_keys_with_mouse_button_held`,
+  `write_string_with_mouse_button_held`, `strike_keys_with_mouse_button_and_keys_held`,
+  `write_string_with_mouse_button_and_keys_held`). Mouse buttons are 0=left, 1=middle,
+  2=right, 3=scroll up, 4=scroll down (up to 7 for exotic buttons).
+- **Scrolling** — `scroll_up` and `scroll_down` with a `repeat` count (capped at 50).
+
+All coordinates are validated against the framebuffer bounds before they are sent, and all
+inputs are validated up front so no partial input reaches the VNC server. The VNC connection
+is established lazily on the first tool call: if the server is unreachable at startup, the
+MCP server still starts, and the failure surfaces as a clean tool error instead of killing
+the process.
 
 ## Contributing
 

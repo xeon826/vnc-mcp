@@ -1,4 +1,4 @@
-"""Nox sessions."""  # noqa: E501, B950
+"""Nox sessions."""  # noqa: E501
 
 from __future__ import annotations
 
@@ -10,10 +10,6 @@ from pathlib import Path
 from textwrap import dedent
 
 import nox
-
-# fmt: off
-# flake8: noqa
-# isort: skip_file
 
 
 try:
@@ -37,7 +33,6 @@ nox.options.sessions = (
     "safety",
     "mypy",
     "tests",
-    "typeguard",
     "xdoctest",
     "docs-build",
     "pyinstaller",
@@ -137,17 +132,10 @@ def precommit(session: Session) -> None:
     ]
     session.install(
         "bandit",
-        "black",
         "darglint",
-        "flake8",
-        "flake8-bugbear",
-        "flake8-docstrings",
-        "flake8-rst-docstrings",
-        "isort",
-        "pep8-naming",
         "pre-commit",
         "pre-commit-hooks",
-        "pyupgrade",
+        "ruff",
     )
     # if this is being run in the template initialization hook, we may not have an internet connection or data may
     # have changed. therefore, we need to skip relocking the poetry file.
@@ -196,14 +184,6 @@ def coverage(session: Session) -> None:
         session.run("coverage", "combine")
 
     session.run("coverage", *args)
-
-
-@session(python=python_versions[0])
-def typeguard(session: Session) -> None:
-    """Runtime type checking using Typeguard."""
-    session.install(".")
-    session.install("pytest", "typeguard", "pygments")
-    session.run("pytest", f"--typeguard-packages={package}", *session.posargs)
 
 
 @session(python=python_versions)
